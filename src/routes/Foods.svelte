@@ -1131,6 +1131,16 @@
         if (hydrated) food = { ...food, ...hydrated };
       } catch { /* fall through with the un-hydrated hit */ }
     }
+    // SR Legacy and Foundation search hits have no household portions; fetch
+    // them from the food's detail record so "1 large" / "1 cup" show up as
+    // alt_units. Survey hits bring theirs, and Branded ones a serving size.
+    // Saved foods (numeric id) already have whatever units they were given.
+    if (food && food._source === 'usda' && typeof food.id !== 'number' && !food.alt_units
+        && (food.dataType === 'SR Legacy' || food.dataType === 'Foundation')
+        && typeof food.barcode === 'string' && food.barcode.startsWith('fdcId_')) {
+      const altUnits = await USDA.fetchAltUnits(food.barcode.slice(6), usdaApiKey.get()).catch(() => null);
+      if (altUnits) food = { ...food, alt_units: altUnits };
+    }
     // #241: in pick mode a tap adds straight to the meal, and an OFF product
     // with no "as sold" values would go in as 0 kcal. The editor says why,
     // offers the "as prepared" values if OFF has them, and adds the food to

@@ -299,3 +299,56 @@ export function scaleFactor(origPortion, origUnit, newPortion, newUnit, food = n
   // cross-system picks on foods without density).
   return newP / origP;
 }
+
+// USDA portions -> alt_units rows (#289), from a /food/{fdcId} detail's
+// foodPortions or a Survey search hit's foodMeasures. The label lives in a
+// different field per data type:
+//   SR Legacy: modifier "large" / "cup, chopped", measureUnit "undetermined"
+//   Foundation: measureUnit.name "cup" (+ optional modifier "chopped")
+//   Survey: portionDescription / disseminationText "1 egg", "1/2 cup"; its
+//     modifier is a numeric food code, not a label
+// grams is per ONE unit: gramWeight / amount, where a Survey row's amount is
+// the number its text starts with ("1/2 cup" = 120 g -> cup = 240). Survey's
+// "Quantity not specified" (USDA's typical portion) becomes "serving", unless
+// another unit weighs the same (fried egg: serving = 1 egg = 55 g).
+// Dropped: Foundation's RACC row and Survey's "guideline amount per ..."
+// rows (reference amounts, not units anyone picks); bare mass units like
+// "oz", which scaleFactor already converts; duplicates. Volume rows stay:
+// "1 cup" of cooked rice is 174 g, not the 240 g a water-based cup gives.
+// Returns null when nothing usable is left, matching OFF's altUnits.
+const USDA_BARE_MASS = new Set(['g', 'mg', 'kg', 'oz', 'lb']);
+export function usdaPortionsToAltUnits(portions) {
+  if (!Array.isArray(portions)) return null;
+  const rows = [];
+  const seen = new Set();
+  for (const p of portions) {
+    const grams = Number(p && p.gramWeight);
+    if (!Number.isFinite(grams) || grams <= 0) continue;
+    const unitName = String((p.measureUnit && p.measureUnit.name) || p.measureUnitName || '').trim();
+    if (unitName === 'RACC') continue;
+    const modifier = String(p.modifier || '').trim();
+    let label;
+    let amount = Number(p.amount);
+    if (unitName && unitName !== 'undetermined') {
+      label = modifier ? unitName + ', ' + modifier : unitName;
+    } else if (modifier && !/^\d/.test(modifier)) {
+      label = modifier;
+    } else {
+      const text = String(p.portionDescription || p.disseminationText || '');
+      const m = text.match(/^\s*(\d+(?:\.\d+)?)(?:\s*\/\s*(\d+))?\s*/);
+      if (m && !(amount > 0)) amount = m[2] ? Number(m[1]) / Number(m[2]) : Number(m[1]);
+      label = m ? text.slice(m[0].length) : text;
+    }
+    if (!(amount > 0)) amount = 1;
+    label = label.trim().toLowerCase();
+    if (label === 'quantity not specified') label = 'serving';
+    if (!label || /^guideline amount/.test(label) || seen.has(label)) continue;
+    if (USDA_BARE_MASS.has(label)) continue;
+    seen.add(label);
+    rows.push({ abbr: label, grams: Math.round(grams / amount * 10) / 10 });
+  }
+  const serving = rows.find(r => r.abbr === 'serving');
+  const out = serving && rows.some(r => r !== serving && r.grams === serving.grams)
+    ? rows.filter(r => r !== serving) : rows;
+  return out.length ? out : null;
+}

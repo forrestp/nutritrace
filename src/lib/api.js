@@ -5,6 +5,7 @@ import { settingPrefix } from './setting-key.js';
 import { rankOFFResults } from './off-rank.js';
 import { offProductName } from './off-name.js';
 import { asSoldNutriments } from './off-nutrition-sets.js';
+import { usdaPortionsToAltUnits } from './units.js';
 
 // In native mode, call external APIs directly (no CORS in WebView).
 // In web mode, go through the server proxy to avoid CORS.
@@ -770,6 +771,9 @@ const USDA = {
       // composite), 'Branded' (brand-submitted, quality varies wildly),
       // 'Experimental' (research; tiny). Null for old imports that lack it.
       dataType:  item.dataType || null,
+      // Survey hits carry household portions as foodMeasures; SR Legacy and
+      // Foundation hits don't, and get theirs on tap (fetchAltUnits).
+      alt_units: item.dataType === 'Branded' ? null : usdaPortionsToAltUnits(item.foodMeasures),
       _source:   'usda',
     };
   },
@@ -824,6 +828,39 @@ const USDA = {
     } catch(e) {
       console.error('[USDA] Search failed:', e);
       return { items: [], totalHits: 0, page, hasMore: false };
+    }
+  },
+
+  // SR Legacy and Foundation search hits carry no household portions
+  // (#289), so they imported as per-100g with no "1 large" to pick. The
+  // /food/{fdcId} detail has them as foodPortions; fetch on tap, like OFF's
+  // fetchProductByCode, and map them to alt_units ({abbr: 'large',
+  // grams: 46}). LRU-capped and cached in-session by fdcId.
+  _portionCache: new Map(),
+  _PORTION_CACHE_MAX: 200,
+  async fetchAltUnits(fdcId, apiKey) {
+    if (!fdcId || !apiKey) return null;
+    if (this._portionCache.has(fdcId)) {
+      const cached = this._portionCache.get(fdcId);
+      this._portionCache.delete(fdcId);
+      this._portionCache.set(fdcId, cached);
+      return cached;
+    }
+    try {
+      const url = _USDA_BASE + '/food/' + encodeURIComponent(fdcId) +
+        '?api_key=' + encodeURIComponent(apiKey);
+      const res = await _extFetch(url);
+      if (!res.ok) return null;
+      const data = await res.json();
+      const altUnits = usdaPortionsToAltUnits(data.foodPortions);
+      this._portionCache.set(fdcId, altUnits);
+      if (this._portionCache.size > this._PORTION_CACHE_MAX) {
+        this._portionCache.delete(this._portionCache.keys().next().value);
+      }
+      return altUnits;
+    } catch(e) {
+      console.error('[USDA] Portion lookup failed:', e);
+      return null;
     }
   },
 
